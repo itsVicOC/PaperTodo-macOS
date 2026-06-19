@@ -196,6 +196,9 @@ jobs:
         run: |
           tag="${{ steps.release.outputs.tag }}"
           is_prerelease="${{ inputs.prerelease }}"
+          if [[ "$tag" =~ (alpha|beta|rc|pre) ]]; then
+            is_prerelease="true"
+          fi
           mapfile -t assets < <(find release -maxdepth 1 -type f ! -name 'CHANGELOG_EXTRACT.md' ! -name 'RELEASE_NOTES.md' | sort)
 
           if gh release view "$tag" >/dev/null 2>&1; then
