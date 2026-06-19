@@ -1,0 +1,15 @@
+.DS_Store
+
+# SwiftPM / local builds
+macos/PaperTodoMac/.build/
+macos/PaperTodoMac/.swiftpm/
+
+# Local PaperTodo data and crash files
+data.json
+data.json.tmp
+data.backup.json
+data.crash_recovery.json
+PaperTodo.crash.log
+
+# Local scratch/debug files
+.codex_decompile_debug/

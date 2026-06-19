@@ -1,0 +1,221 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create or update. Defaults to v<macOS app version>."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark the GitHub Release as a prerelease."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-macos:
+    name: Build macOS app
+    runs-on: macos-15
+
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      macos_zip: ${{ steps.meta.outputs.macos_zip }}
+      macos_notice: ${{ steps.meta.outputs.macos_notice }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Read macOS metadata
+        id: meta
+        working-directory: macos/PaperTodoMac
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Resources/Info.plist)"
+          arch="$(uname -m)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "macos_zip=PaperTodo-v${version}-macos-${arch}-unnotarized.app.zip" >> "$GITHUB_OUTPUT"
+          echo "macos_notice=README-macOS-unnotarized.txt" >> "$GITHUB_OUTPUT"
+
+      - name: Run Swift tests
+        working-directory: macos/PaperTodoMac
+        run: swift test
+
+      - name: Package unnotarized app
+        working-directory: macos/PaperTodoMac
+        run: ./scripts/package-release.sh
+
+      - name: Verify package checksums
+        working-directory: macos/PaperTodoMac/.build/release-assets
+        run: shasum -a 256 -c SHA256SUMS.txt
+
+      - name: Upload macOS assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: PaperTodo-v${{ steps.meta.outputs.version }}-macos
+          if-no-files-found: error
+          path: |
+            macos/PaperTodoMac/.build/release-assets/${{ steps.meta.outputs.macos_zip }}
+            macos/PaperTodoMac/.build/release-assets/${{ steps.meta.outputs.macos_notice }}
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - build-macos
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+
+      - name: Write SHA256 checksums
+        run: |
+          cd release
+          shasum -a 256 \
+            "${{ needs.build-macos.outputs.macos_zip }}" \
+            "${{ needs.build-macos.outputs.macos_notice }}" \
+            > SHA256SUMS.txt
+          ls -lh
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign release assets
+        working-directory: release
+        run: |
+          for file in \
+            "${{ needs.build-macos.outputs.macos_zip }}" \
+            "${{ needs.build-macos.outputs.macos_notice }}"; do
+            cosign sign-blob \
+              --yes \
+              --output-signature "$file.sig" \
+              --output-certificate "$file.crt" \
+              "$file"
+          done
+          cosign sign-blob \
+            --yes \
+            --output-signature SHA256SUMS.txt.sig \
+            --output-certificate SHA256SUMS.txt.crt \
+            SHA256SUMS.txt
+          ls -lh
+
+      - name: Resolve release tag
+        id: release
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            tag="${{ github.ref_name }}"
+          else
+            tag="${{ inputs.release_tag }}"
+            if [[ -z "$tag" ]]; then
+              tag="v${{ needs.build-macos.outputs.version }}"
+            fi
+          fi
+
+          if [[ "$tag" != v* ]]; then
+            echo "Release tag must start with 'v'. Got '$tag'." >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Write release notes
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          repo="${{ github.repository }}"
+          macos_zip="${{ needs.build-macos.outputs.macos_zip }}"
+          macos_notice="${{ needs.build-macos.outputs.macos_notice }}"
+          identity_pattern="^https://github[.]com/${repo}/[.]github/workflows/release[.]yml@refs/(heads/main|tags/v.*)$"
+
+          python3 - "$tag" <<'PY' > release/CHANGELOG_EXTRACT.md
+          import re
+          import sys
+          from pathlib import Path
+
+          tag = sys.argv[1]
+          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = re.compile(rf"^\s*###\s+{re.escape(tag)}(?:\s|$)", re.MULTILINE)
+          match = pattern.search(text)
+          if not match:
+              raise SystemExit(f"CHANGELOG.md does not contain a release section for {tag}.")
+          start = text.find("\n", match.end())
+          if start < 0:
+              raise SystemExit(f"CHANGELOG.md section for {tag} is empty.")
+          next_match = re.search(r"^\s*###\s+v", text[start + 1:], re.MULTILINE)
+          end = len(text) if not next_match else start + 1 + next_match.start()
+          notes = text[start:end].strip()
+          if not notes:
+              raise SystemExit(f"CHANGELOG.md section for {tag} is empty.")
+          print(notes)
+          PY
+
+          {
+            echo "PaperTodo for macOS ${tag}"
+            echo
+            echo "更新内容:"
+            echo
+            cat release/CHANGELOG_EXTRACT.md
+            echo
+            echo "macOS app:"
+            echo
+            echo "- ${macos_zip}: AppKit native app, ad-hoc signed, not notarized, requires macOS 13 or newer."
+            echo "- ${macos_notice}: first-launch and verification notes for the unnotarized macOS build."
+            echo
+            echo "Windows builds are not published by this repository. Use the original Windows project:"
+            echo
+            echo "- https://github.com/snownico0722/PaperTodo"
+            echo
+            echo "SHA256 hashes are included in SHA256SUMS.txt."
+            echo
+            echo "Sigstore keyless signatures are included as .sig and .crt files. Verify them with:"
+            echo
+            echo '```sh'
+            echo "cosign verify-blob --certificate ${macos_zip}.crt --signature ${macos_zip}.sig --certificate-identity-regexp '${identity_pattern}' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' ${macos_zip}"
+            echo "cosign verify-blob --certificate SHA256SUMS.txt.crt --signature SHA256SUMS.txt.sig --certificate-identity-regexp '${identity_pattern}' --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' SHA256SUMS.txt"
+            echo '```'
+          } > release/RELEASE_NOTES.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          is_prerelease="${{ inputs.prerelease }}"
+          mapfile -t assets < <(find release -maxdepth 1 -type f ! -name 'CHANGELOG_EXTRACT.md' ! -name 'RELEASE_NOTES.md' | sort)
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${assets[@]}" --clobber
+            gh release edit "$tag" --title "PaperTodo for macOS $tag" --notes-file release/RELEASE_NOTES.md
+            if [[ "$is_prerelease" == "true" ]]; then
+              gh release edit "$tag" --prerelease
+            fi
+          else
+            create_args=(
+              release create "$tag"
+              "${assets[@]}"
+              --target "${GITHUB_SHA}"
+              --title "PaperTodo for macOS $tag"
+              --notes-file release/RELEASE_NOTES.md
+            )
+
+            if [[ "$is_prerelease" == "true" ]]; then
+              create_args+=(--prerelease)
+            fi
+
+            gh "${create_args[@]}"
+          fi
