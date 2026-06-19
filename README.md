@@ -6,7 +6,7 @@
 
 PaperTodo 的原生 macOS/AppKit 版本。这个仓库只维护 macOS 版；Windows 版、Windows 下载和 Windows 源码请前往原作者仓库：[snownico0722/PaperTodo](https://github.com/snownico0722/PaperTodo)。
 
-![version](https://img.shields.io/badge/version-v2.0-3b82f6) ![platform](https://img.shields.io/badge/platform-macOS%2013%2B-555) ![UI](https://img.shields.io/badge/UI-AppKit-007aff) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-v2.0rc2-3b82f6) ![platform](https://img.shields.io/badge/platform-macOS%2013%2B-555) ![UI](https://img.shields.io/badge/UI-AppKit-007aff) ![license](https://img.shields.io/badge/license-MIT-green)
 
 </div>
 
